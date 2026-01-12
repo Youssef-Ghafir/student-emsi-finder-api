@@ -3,7 +3,7 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { Redis } = require("@upstash/redis");
 const Busboy = require("busboy");
 const crypto = require("crypto");
-const { v4: uuidv4 } = require('uuid'); // <--- ADD THIS LINE
+const { v4: uuidv4 } = require("uuid"); // <--- ADD THIS LINE
 const { normalizeFilename, findStudentByName } = require("./helpers");
 require("dotenv").config();
 const app = express();
@@ -33,6 +33,11 @@ app.get("/", async (req, res) => {
   const checkForFile = req.query.check_for_file;
   if (checkForFile && studentName && fileHash) {
     const checkFileIsProcessing = await redis.get(`file_name:${fileHash}`);
+    console.log(
+      "im the result of checkFile is Processing : ",
+      checkFileIsProcessing
+    );
+
     if (checkFileIsProcessing != null) {
       if (checkFileIsProcessing) {
         const cacheKey = `pdf:hash:${fileHash}`;
@@ -45,13 +50,16 @@ app.get("/", async (req, res) => {
         } else {
           return res.status(200).json({ source: "cache", status: "not found" });
         }
-      } else {
-        return res.status(200).json({
-          source: "cache",
-          status: "missing",
-          message: "no file with this name found !",
-        });
       }
+      return res
+        .status(200)
+        .json({ source: "cache", status: checkFileIsProcessing });
+    } else {
+      return res.status(200).json({
+        source: "cache",
+        status: "missing",
+        message: "no file with this name found !",
+      });
     }
   }
   if (jobId) {
@@ -87,7 +95,7 @@ app.get("/", async (req, res) => {
     return res.status(500).json({ error: "Cache check failed" });
   }
 });
-
+// handle the POST request
 app.post("/", (req, res) => {
   if (
     !req.headers["content-type"] ||
@@ -97,23 +105,44 @@ app.post("/", (req, res) => {
       .status(400)
       .json({ error: "Missing Content-Type. Are you sending a file?" });
   }
-  const busboy = Busboy({ headers: req.headers });
+  const busboy = Busboy({
+    headers: req.headers,
+    limits: { fileSize: 5 * 1024 * 1024 },
+  });
   let fileBuffer = null;
   let filename = null;
   let studentName = null;
+  let fileisToBig = false;
   busboy.on("file", (fieldname, file, info) => {
     filename = normalizeFilename(info.filename);
     const buffers = [];
-    file.on("data", (data) => buffers.push(data));
-    file.on("end", () => (fileBuffer = Buffer.concat(buffers)));
+    file.on("limit", () => {
+      console.log(`File ${fieldname} exceeds size limit!`);
+      fileisToBig = true;
+      file.resume();
+    });
+    file.on("data", (data) => {
+      if (!fileisToBig) {
+        buffers.push(data);
+      }
+    });
+    file.on("end", () => {
+      if (file.truncated) {
+        fileisToBig = true;
+      }
+      if (!fileisToBig) {
+        fileBuffer = Buffer.concat(buffers);
+      }
+    });
   });
   busboy.on("field", (fieldname, value) => {
     if (fieldname === "student_name") studentName = value.trim();
   });
-
   busboy.on("finish", async () => {
+    if (fileisToBig) {
+      return res.status(413).json({ error: "File is too large! Max 5MB" });
+    }
     if (!fileBuffer) return res.status(400).json({ error: "No file uploaded" });
-
     // 1. Generate ID & Reply IMMEDIATELY
     const fileHash = crypto
       .createHash("sha256")
@@ -150,6 +179,7 @@ app.post("/", (req, res) => {
               { ...result, source: "cache" },
               { ex: 300 }
             );
+            await redis.set(`file_name:${fileHash}`, true, { ex: 300 });
             return; // Stop here, don't call Gemini
           }
         }
@@ -192,13 +222,6 @@ app.post("/", (req, res) => {
           await redis.set(`pdf:hash:${fileHash}`, parsedData, { ex: 86400 });
           await redis.set(`file_name:${fileHash}`, true, { ex: 300 });
         }
-        // you can ignore this if work later
-        // if (filename) {
-        //    await redis.set(`pdf:name:${filename}`, parsedData, { ex: 86400 });
-        //    await redis.set(`file_name=${filename}`, true, { ex: 300});
-        // }
-
-        // 2. Save specific result to Job ID (for current user)
         const studentResult = findStudentByName(parsedData, studentName);
         await redis.set(
           `job:${jobId}`,
