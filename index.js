@@ -5,6 +5,7 @@ const Busboy = require("busboy");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid"); // <--- ADD THIS LINE
 const { normalizeFilename, findStudentByName } = require("./helpers");
+const { extractTableData } = require("./azureOCR");
 require("dotenv").config();
 const app = express();
 const port = process.env.PORT || 8080;
@@ -76,6 +77,7 @@ app.get("/", async (req, res) => {
   try {
     const cachedData = await redis.get(cacheKey);
     if (cachedData) {
+      console.log("Cache was found !");
       const result = findStudentByName(cachedData, studentName);
       // FIX: Ensure consistency in response structure
       return res
@@ -183,13 +185,22 @@ app.post("/", (req, res) => {
             return; // Stop here, don't call Gemini
           }
         }
-
-        // B. Call Gemini
-        console.log("Calling Gemini...");
-        const startTime = Date.now();
-        const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
-
-        const prompt = `
+        let parsedData;
+        let isAzure = true
+        try {
+          console.log("Calling Azure...");
+          const startTime = Date.now();
+          const tableData = await extractTableData(fileBuffer);
+          parsedData = tableData;
+          const duration = (Date.now() - startTime) / 1000;
+          console.log(`✅ Azure finished in ${duration}s`);
+        } catch (err) {
+          console.error(err);
+          console.log("Calling Gemini...");
+          isAzure = false;
+          const startTime = Date.now();
+          const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+          const prompt = `
             Analyze this PDF page. extract all students.
             Return a strict JSON ARRAY of objects.
             Use EXACTLY these lowercase keys:
@@ -198,23 +209,22 @@ app.post("/", (req, res) => {
             - "class"
             Do not include Markdown formatting. Just raw JSON.
           `;
-
-        const result = await model.generateContent([
-          prompt,
-          {
-            inlineData: {
-              data: fileBuffer.toString("base64"),
-              mimeType: "application/pdf",
+          const result = await model.generateContent([
+            prompt,
+            {
+              inlineData: {
+                data: fileBuffer.toString("base64"),
+                mimeType: "application/pdf",
+              },
             },
-          },
-        ]);
+          ]);
+          const duration = (Date.now() - startTime) / 1000;
+          console.log(`✅ Gemini finished in ${duration}s`);
 
-        const duration = (Date.now() - startTime) / 1000;
-        console.log(`✅ Gemini finished in ${duration}s`);
-
-        const text = result.response.text();
-        const cleanJson = text.replace(/```json|```/g, "").trim();
-        const parsedData = JSON.parse(cleanJson);
+          const text = result.response.text();
+          const cleanJson = text.replace(/```json|```/g, "").trim();
+          parsedData = JSON.parse(cleanJson);
+        }
 
         // C. Save Results
         // 1. Save full list to main cache (for future users)
@@ -225,14 +235,14 @@ app.post("/", (req, res) => {
         const studentResult = findStudentByName(parsedData, studentName);
         await redis.set(
           `job:${jobId}`,
-          { ...studentResult, source: "gemini" },
+          { ...studentResult, source: isAzure ? "azure" : "gemini" },
           { ex: 300 }
         );
 
         console.log(`[Background] Job ${jobId} Completed.`);
       } catch (err) {
         console.error(`[Background] Job ${jobId} Failed:`, err);
-        // Save error state so polling stops
+        await redis.del(`file_name:${fileHash}`);
         await redis.set(
           `job:${jobId}`,
           { error: "Processing failed" },
@@ -243,7 +253,6 @@ app.post("/", (req, res) => {
   });
   req.pipe(busboy);
 });
-
 app.listen(port, () => {
   console.log(`EMSI Locator Backend running on port ${port}`);
 });
