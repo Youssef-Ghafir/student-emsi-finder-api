@@ -1,4 +1,5 @@
 const express = require("express");
+const cors = require('cors');
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { Redis } = require("@upstash/redis");
 const Busboy = require("busboy");
@@ -8,20 +9,18 @@ const { normalizeFilename, findStudentByName } = require("./helpers");
 const { extractTableData } = require("./azureOCR");
 require("dotenv").config();
 const app = express();
+app.use(cors({
+  origin: "*", 
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "x-api-secret"],
+  maxAge: 86400
+}));
 const port = process.env.PORT || 8080;
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
   token: process.env.UPSTASH_REDIS_REST_TOKEN,
 });
 const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
-app.use((req, res, next) => {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type, x-api-secret");
-  res.set("Access-Control-Max-Age", "86400");
-  if (req.method === "OPTIONS") return res.status(204).send("");
-  next();
-});
 app.use((req, res, next) => {
   if (req.headers["x-api-secret"] != process.env.API_SECRET) {
     return res.status(401).send("Unauthorized");

@@ -16,6 +16,7 @@
     "@google/generative-ai": "^0.24.1",
     "@upstash/redis": "^1.36.1",
     "busboy": "^1.6.0",
+    "cors": "^2.8.5",
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "uuid": "^13.0.0"
