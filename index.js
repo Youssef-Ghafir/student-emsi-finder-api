@@ -77,8 +77,8 @@ app.get("/", async (req, res) => {
   try {
     const cachedData = await redis.get(cacheKey);
     if (cachedData) {
-      console.log("Cache was found !");
       const result = findStudentByName(cachedData, studentName);
+      console.log(`Cache was hit by ! ${result?.match?.name} || class : ${result?.match?.class} `);
       // FIX: Ensure consistency in response structure
       return res
         .status(200)
@@ -240,6 +240,8 @@ app.post("/", (req, res) => {
         );
 
         console.log(`[Background] Job ${jobId} Completed.`);
+        console.log(`[Background] Job was send to ${studentResult?.match?.name} || class : ${studentResult?.match?.class}`);
+        
       } catch (err) {
         console.error(`[Background] Job ${jobId} Failed:`, err);
         await redis.del(`file_name:${fileHash}`);
