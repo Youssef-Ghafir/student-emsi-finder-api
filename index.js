@@ -1,20 +1,22 @@
 const express = require("express");
-const cors = require('cors');
+const cors = require("cors");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 const { Redis } = require("@upstash/redis");
 const Busboy = require("busboy");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid"); // <--- ADD THIS LINE
-const { normalizeFilename, findStudentByName } = require("./helpers");
+const { normalizeFilename, findStudentByName, findSimilarFriendGrp } = require("./helpers");
 const { extractTableData } = require("./azureOCR");
 require("dotenv").config();
 const app = express();
-app.use(cors({
-  origin: "*", 
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "x-api-secret"],
-  maxAge: 86400
-}));
+app.use(
+  cors({
+    origin: "*",
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "x-api-secret"],
+    maxAge: 86400,
+  }),
+);
 const port = process.env.PORT || 8080;
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -36,7 +38,7 @@ app.get("/", async (req, res) => {
     const checkFileIsProcessing = await redis.get(`file_name:${fileHash}`);
     console.log(
       "im the result of checkFile is Processing : ",
-      checkFileIsProcessing
+      checkFileIsProcessing,
     );
 
     if (checkFileIsProcessing != null) {
@@ -78,7 +80,9 @@ app.get("/", async (req, res) => {
     const cachedData = await redis.get(cacheKey);
     if (cachedData) {
       const result = findStudentByName(cachedData, studentName);
-      console.log(`Cache was hit by ! ${result?.match?.name} || class : ${result?.match?.class} `);
+      console.log(
+        `Cache was hit by ! ${result?.match?.name} || class : ${result?.match?.class} `,
+      );
       // FIX: Ensure consistency in response structure
       return res
         .status(200)
@@ -96,6 +100,34 @@ app.get("/", async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: "Cache check failed" });
   }
+});
+//
+app.get("/similar-firend", async (req, res) => {
+  const file_hash = req.query.file_hash;
+  const student_name = req.query.student_name;
+  const grp_name = req.query.grp_name;
+  const seat_number = req.query.seat_number;
+  if (!file_hash || !student_name || !grp_name || !seat_number) {
+    res.status(400).json({ error: "Missing required parameters" });
+  }
+  const data = await redis.get(`pdf:hash:${file_hash}`);
+  if (!data) {
+    res.status(400).json({ error: "File not found" });
+  }
+  let target_student = findStudentByName(data, student_name);
+
+  if (!target_student) {
+    res.status(400).json({ error: "Student not found in the file" });
+  }
+  let similar =  findSimilarFriendGrp(
+    target_student.student_index,
+    data,
+    seat_number,
+    grp_name
+  );
+  console.log(`Similar Friend was hit by ${student_name} || class : ${grp_name} `);
+  
+  res.status(200).json(similar);
 });
 // handle the POST request
 app.post("/", (req, res) => {
@@ -164,7 +196,7 @@ app.post("/", (req, res) => {
           await redis.set(
             `job:${jobId}`,
             { error: "No student name provided" },
-            { ex: 300 }
+            { ex: 300 },
           );
           return;
         }
@@ -179,14 +211,14 @@ app.post("/", (req, res) => {
             await redis.set(
               `job:${jobId}`,
               { ...result, source: "cache" },
-              { ex: 300 }
+              { ex: 300 },
             );
             await redis.set(`file_name:${fileHash}`, true, { ex: 300 });
             return; // Stop here, don't call Gemini
           }
         }
         let parsedData;
-        let isAzure = true
+        let isAzure = true;
         try {
           console.log("Calling Azure...");
           const startTime = Date.now();
@@ -236,19 +268,20 @@ app.post("/", (req, res) => {
         await redis.set(
           `job:${jobId}`,
           { ...studentResult, source: isAzure ? "azure" : "gemini" },
-          { ex: 300 }
+          { ex: 300 },
         );
 
         console.log(`[Background] Job ${jobId} Completed.`);
-        console.log(`[Background] Job was send to ${studentResult?.match?.name} || class : ${studentResult?.match?.class}`);
-        
+        console.log(
+          `[Background] Job was send to ${studentResult?.match?.name} || class : ${studentResult?.match?.class}`,
+        );
       } catch (err) {
         console.error(`[Background] Job ${jobId} Failed:`, err);
         await redis.del(`file_name:${fileHash}`);
         await redis.set(
           `job:${jobId}`,
           { error: "Processing failed" },
-          { ex: 300 }
+          { ex: 300 },
         );
       }
     })();
