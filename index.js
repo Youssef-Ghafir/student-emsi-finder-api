@@ -5,7 +5,11 @@ const { Redis } = require("@upstash/redis");
 const Busboy = require("busboy");
 const crypto = require("crypto");
 const { v4: uuidv4 } = require("uuid"); // <--- ADD THIS LINE
-const { normalizeFilename, findStudentByName, findSimilarFriendGrp } = require("./helpers");
+const {
+  normalizeFilename,
+  findStudentByName,
+  findSimilarFriendGrp,
+} = require("./helpers");
 const { extractTableData } = require("./azureOCR");
 require("dotenv").config();
 const app = express();
@@ -17,6 +21,7 @@ app.use(
     maxAge: 86400,
   }),
 );
+app.use(express.json());
 const port = process.env.PORT || 8080;
 const redis = new Redis({
   url: process.env.UPSTASH_REDIS_REST_URL,
@@ -108,28 +113,29 @@ app.get("/similar-firend", async (req, res) => {
   const grp_name = req.query.grp_name;
   const seat_number = req.query.seat_number;
   if (!file_hash || !student_name || !grp_name || !seat_number) {
-    res.status(400).json({ error: "Missing required parameters" });
+    return res.status(400).json({ error: "Missing required parameters" });
   }
   const data = await redis.get(`pdf:hash:${file_hash}`);
   if (!data) {
-    res.status(400).json({ error: "File not found" });
+    return res.status(404).json({ error: "File not found" });
   }
   let target_student = findStudentByName(data, student_name);
 
   if (!target_student) {
-    res.status(400).json({ error: "Student not found in the file" });
+    return res.status(400).json({ error: "Student not found in the file" });
   }
-  let similar =  findSimilarFriendGrp(
+  let similar = findSimilarFriendGrp(
     target_student.student_index,
     data,
     seat_number,
-    grp_name
+    grp_name,
   );
-  console.log(`Similar Friend was hit by ${student_name} || class : ${grp_name} `);
-  
-  res.status(200).json(similar);
+  console.log(
+    `Similar Friend was hit by ${student_name} || class : ${grp_name} `,
+  );
+
+  return res.status(200).json(similar);
 });
-// handle the POST request
 app.post("/", (req, res) => {
   if (
     !req.headers["content-type"] ||
@@ -287,6 +293,59 @@ app.post("/", (req, res) => {
     })();
   });
   req.pipe(busboy);
+});
+app.post("/vote", async (req, res) => {
+  console.log(req.body);
+
+  const { fileHash, vote } = req.body;
+
+  if (!fileHash || !["cooked", "inchallah", "crush"].includes(vote)) {
+    return res.status(400).json({ error: "Invalid vote" });
+  }
+  const pdfExists = await redis.exists(`pdf:hash:${fileHash}`);
+  if (!pdfExists) {
+    console.warn(`⚠️ Fake vote attempt on non-existent hash: ${fileHash}`);
+    return res.status(404).json({ error: "Exam file not found. Cannot vote." });
+  }
+  const key = `poll:${fileHash}`;
+
+  try {
+    await redis.hincrby(key, vote, 1);
+    const stats = await redis.hgetall(key);
+    let total =
+      parseInt(stats.cooked || 0) +
+      parseInt(stats.inchallah || 0) +
+      parseInt(stats.crush || 0);
+    if (total == 1) {
+      await redis.expire(key, 86400);
+    }
+    res.json({
+      cooked: parseInt(stats.cooked || 0),
+      inchallah: parseInt(stats.inchallah || 0),
+      crush: parseInt(stats.crush || 0),
+      total: total,
+    });
+  } catch (error) {
+    console.error("Redis Error:", error);
+    res.status(500).json({ error: "Failed to count vote" });
+  }
+});
+
+app.get("/vote-stats", async (req, res) => {
+  const { fileHash } = req.query;
+  const stats = await redis.hgetall(`poll:${fileHash}`);
+  if(stats == null){
+    return res.status(404).json({ error: "Exam file not found. Cannot vote." });
+  }
+  res.json({
+    cooked: parseInt(stats.cooked || 0),
+    inchallah: parseInt(stats.inchallah || 0),
+    crush: parseInt(stats.crush || 0),
+    total:
+      parseInt(stats.cooked || 0) +
+      parseInt(stats.inchallah || 0) +
+      parseInt(stats.crush || 0),
+  });
 });
 app.listen(port, () => {
   console.log(`EMSI Locator Backend running on port ${port}`);
